@@ -1,0 +1,6 @@
+*~
+*.d
+*.o
+keep
+/build-*/
+/tbindiff
