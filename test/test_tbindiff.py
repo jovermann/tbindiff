@@ -89,12 +89,20 @@ class TbindiffTest(unittest.TestCase):
         self.assertNotIn("|B|", result.stdout)
 
     def test_ascii_control_non_ascii_and_space_annotations(self):
-        result = self.run_diff(b"\n \t\x01\x80", b"\r \t\x02\xff", "--ascii", "--show-matches",
+        result = self.run_diff(b"\n \t\x00\x07\x08\x7f\x01\x80", b"\r \t\x02\x03\x04\x05\x06\xff", "--ascii", "--show-matches",
                                "--annotate-spaces", "--width", "100")
         self.assertIn("<LF>", result.stdout)
         self.assertIn("<CR>", result.stdout)
         self.assertIn("<SP>", result.stdout)
         self.assertIn("<TAB>", result.stdout)
+        self.assertIn("<x00>", result.stdout)
+        self.assertIn("<x07>", result.stdout)
+        self.assertIn("<x08>", result.stdout)
+        self.assertIn("<x7F>", result.stdout)
+        self.assertNotIn("<NUL>", result.stdout)
+        self.assertNotIn("<BEL>", result.stdout)
+        self.assertNotIn("<BS>", result.stdout)
+        self.assertNotIn("<DEL>", result.stdout)
         self.assertIn("<x01>", result.stdout)
         self.assertIn("<x02>", result.stdout)
         self.assertIn("<x80>", result.stdout)
@@ -108,6 +116,12 @@ class TbindiffTest(unittest.TestCase):
         binary = self.run_diff(b"\x80abc", b"\x81abc")
         self.assertIn("80 ", binary.stdout)
         self.assertIn("81 ", binary.stdout)
+        controls = self.run_diff(b"\x00abcdefghi", b"\x7fabcdefghi")
+        self.assertIn("00 ", controls.stdout)
+        self.assertIn("7f ", controls.stdout)
+        named_controls = self.run_diff(b"\tabcdefghi", b"\nabcdefghi")
+        self.assertIn("<TAB>", named_controls.stdout)
+        self.assertIn("<LF>", named_controls.stdout)
 
     def test_ascii_rows_fill_rendered_width(self):
         result = self.run_diff(b"A" * 20, b"B" * 20, "--ascii", "--width", "80")

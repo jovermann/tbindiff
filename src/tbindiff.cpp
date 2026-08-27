@@ -116,9 +116,14 @@ static Bytes readFile(const fs::path& path)
 
 static bool looksAscii(const Bytes& data)
 {
-    size_t nonAscii = 0;
-    for (uint8_t value: data) nonAscii += value >= 0x80;
-    return data.empty() || static_cast<long double>(nonAscii) * 10.0L < static_cast<long double>(data.size());
+    size_t binaryBytes = 0;
+    for (uint8_t value: data)
+    {
+        const bool namedControl = (value >= 0x09 && value <= 0x0d) || value == 0x1b;
+        const bool printableAscii = value >= 0x20 && value <= 0x7e;
+        binaryBytes += !namedControl && !printableAscii;
+    }
+    return data.empty() || static_cast<long double>(binaryBytes) * 10.0L < static_cast<long double>(data.size());
 }
 
 static std::vector<Cost> lastCostRow(const uint8_t* a, size_t na, const uint8_t* b, size_t nb, bool reverse)
@@ -452,9 +457,6 @@ static std::string asciiToken(uint8_t value, bool annotateSpaces)
 {
     switch (value)
     {
-    case 0x00: return "<NUL>";
-    case 0x07: return "<BEL>";
-    case 0x08: return "<BS>";
     case 0x09: return "<TAB>";
     case 0x0a: return "<LF>";
     case 0x0b: return "<VT>";
@@ -462,7 +464,6 @@ static std::string asciiToken(uint8_t value, bool annotateSpaces)
     case 0x0d: return "<CR>";
     case 0x1b: return "<ESC>";
     case 0x20: return annotateSpaces ? "<SP>" : " ";
-    case 0x7f: return "<DEL>";
     default:
         if (value >= 0x21 && value <= 0x7e) return std::string(1, static_cast<char>(value));
         std::ostringstream os;
