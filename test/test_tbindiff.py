@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import unittest
 import re
+import random
 from pathlib import Path
 
 
@@ -44,6 +45,17 @@ class TbindiffTest(unittest.TestCase):
         deleted = self.run_diff(b"abXcd", b"abcd", "--ascii")
         self.assertEqual(deleted.returncode, 1)
         self.assertIn("X", deleted.stdout)
+
+    def test_fine_diff_is_opt_in_for_unanchored_gaps(self):
+        coarse = self.run_diff(b"abXcd", b"abcd", "--ascii", "--show-matches", "--width", "100")
+        fine = self.run_diff(b"abXcd", b"abcd", "--ascii", "--show-matches", "--fine-diff", "--width", "100")
+        self.assertIn("abXc", coarse.stdout)
+        self.assertNotIn("abXc", fine.stdout)
+
+    def test_anchor_size_must_be_positive(self):
+        result = self.run_diff(b"a", b"b", "--anchor-size", "0")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("positive integer", result.stdout)
 
     def test_argument_errors(self):
         result = self.run_diff(b"a", b"b", "--hex", "--ascii")
@@ -112,6 +124,14 @@ class TbindiffTest(unittest.TestCase):
         self.assertEqual(len(linefeed_lines), 1)
         self.assertNotIn("after", linefeed_lines[0])
         self.assertNotIn("AFTER", linefeed_lines[0])
+
+    def test_matching_anchor_is_expanded_to_full_sequence(self):
+        rng = random.Random(7)
+        common = bytes(rng.randrange(ord("a"), ord("z") + 1) for _ in range(512))
+        result = self.run_diff(b"static removed section\n\nstatic " + common, b"static " + common,
+                               "--ascii", "--show-matches", "--width", "160")
+        matching_static = [line for line in result.stdout.splitlines() if line.count("static") >= 2]
+        self.assertTrue(matching_static)
 
 
 if __name__ == "__main__":

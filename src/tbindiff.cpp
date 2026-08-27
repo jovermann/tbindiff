@@ -35,7 +35,6 @@ struct Edit
 using Bytes = std::vector<uint8_t>;
 using Cost = uint32_t;
 
-static constexpr size_t anchorLength = 16;
 static constexpr uint64_t maxDpCells = 30000000;
 
 class Progress
@@ -248,31 +247,29 @@ struct Anchor
     size_t right{};
 };
 
-static uint64_t anchorHash(const uint8_t* data)
-{
-    uint64_t hash = 1469598103934665603ULL;
-    for (size_t i = 0; i < anchorLength; ++i)
-    {
-        hash ^= data[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-static std::vector<Anchor> findAnchors(const Bytes& left, const Bytes& right)
+static std::vector<Anchor> findAnchors(const Bytes& left, const Bytes& right, size_t anchorSize)
 {
     std::unordered_map<uint64_t, AnchorInfo> table;
     table.reserve((left.size() + right.size()) / 24 + 1);
     auto scan = [&](const Bytes& data, bool isLeft) {
-        if (data.size() < anchorLength) return;
-        for (size_t pos = 0; pos + anchorLength <= data.size(); ++pos)
+        if (data.size() < anchorSize) return;
+        // A rolling polynomial hash keeps configurable large anchors linear-time.
+        constexpr uint64_t base = 0x100000001b3ULL;
+        uint64_t power = 1;
+        for (size_t i = 1; i < anchorSize; ++i) power *= base;
+        uint64_t hash = 0;
+        for (size_t i = 0; i < anchorSize; ++i) hash = hash * base + data[i] + 1U;
+        for (size_t pos = 0; pos + anchorSize <= data.size(); ++pos)
         {
-            const uint64_t hash = anchorHash(data.data() + pos);
             // Content-defined sampling survives insertions because it depends on bytes, not offsets.
-            if ((hash & 31U) != 0) continue;
-            AnchorInfo& info = table[hash];
-            if (isLeft) { info.left = pos; ++info.leftCount; }
-            else { info.right = pos; ++info.rightCount; }
+            if ((hash & 31U) == 0)
+            {
+                AnchorInfo& info = table[hash];
+                if (isLeft) { info.left = pos; ++info.leftCount; }
+                else { info.right = pos; ++info.rightCount; }
+            }
+            if (pos + anchorSize < data.size())
+                hash = (hash - static_cast<uint64_t>(data[pos] + 1U) * power) * base + data[pos + anchorSize] + 1U;
         }
     };
     scan(left, true);
@@ -284,7 +281,7 @@ static std::vector<Anchor> findAnchors(const Bytes& left, const Bytes& right)
         (void)hash;
         if (info.leftCount == 1 && info.rightCount == 1 &&
             std::equal(left.begin() + static_cast<ptrdiff_t>(info.left),
-                       left.begin() + static_cast<ptrdiff_t>(info.left + anchorLength),
+                       left.begin() + static_cast<ptrdiff_t>(info.left + anchorSize),
                        right.begin() + static_cast<ptrdiff_t>(info.right)))
             candidates.push_back({info.left, info.right});
     }
@@ -312,15 +309,23 @@ static std::vector<Anchor> findAnchors(const Bytes& left, const Bytes& right)
     }
     std::vector<Anchor> nonOverlapping;
     for (const Anchor& anchor: chain)
-        if (nonOverlapping.empty() || (anchor.left >= nonOverlapping.back().left + anchorLength &&
-                                       anchor.right >= nonOverlapping.back().right + anchorLength))
+        if (nonOverlapping.empty() || (anchor.left >= nonOverlapping.back().left + anchorSize &&
+                                       anchor.right >= nonOverlapping.back().right + anchorSize))
             nonOverlapping.push_back(anchor);
     return nonOverlapping;
 }
 
 static void fastGapDiff(const uint8_t* left, size_t leftSize, const uint8_t* right, size_t rightSize,
-                        uint64_t maxMemory, uint64_t& cellsLeft, std::vector<Edit>& result)
+                        bool fineDiff, uint64_t maxMemory, uint64_t& cellsLeft, std::vector<Edit>& result)
 {
+    if (!fineDiff)
+    {
+        const size_t paired = std::min(leftSize, rightSize);
+        for (size_t i = 0; i < paired; ++i) result.push_back({EditKind::Substitute, left[i], right[i]});
+        for (size_t i = paired; i < leftSize; ++i) result.push_back({EditKind::Delete, left[i], 0});
+        for (size_t i = paired; i < rightSize; ++i) result.push_back({EditKind::Insert, 0, right[i]});
+        return;
+    }
     size_t prefix = 0;
     while (prefix < leftSize && prefix < rightSize && left[prefix] == right[prefix]) ++prefix;
     for (size_t i = 0; i < prefix; ++i) result.push_back({EditKind::Match, left[i], right[i]});
@@ -355,10 +360,18 @@ static void fastGapDiff(const uint8_t* left, size_t leftSize, const uint8_t* rig
         result.push_back({EditKind::Match, left[leftSize - i], right[rightSize - i]});
 }
 
-static std::vector<Edit> makeDiff(const Bytes& left, const Bytes& right, uint64_t maxMemory, Progress& progress)
+static std::vector<Edit> makeDiff(const Bytes& left, const Bytes& right, size_t anchorSize, bool fineDiff,
+                                  uint64_t maxMemory, Progress& progress)
 {
+    if (left == right)
+    {
+        std::vector<Edit> result;
+        result.reserve(left.size());
+        for (uint8_t value: left) result.push_back({EditKind::Match, value, value});
+        return result;
+    }
     progress.phase("Finding matching binary sequences...");
-    const std::vector<Anchor> anchors = findAnchors(left, right);
+    const std::vector<Anchor> anchors = findAnchors(left, right, anchorSize);
     progress.phase("Diffing regions...");
     std::vector<Edit> result;
     result.reserve(std::max(left.size(), right.size()));
@@ -367,16 +380,28 @@ static std::vector<Edit> makeDiff(const Bytes& left, const Bytes& right, uint64_
     auto at = [](const Bytes& bytes, size_t pos) { return bytes.empty() ? nullptr : bytes.data() + pos; };
     for (const Anchor& anchor: anchors)
     {
-        fastGapDiff(at(left, leftPos), anchor.left - leftPos, at(right, rightPos),
-                    anchor.right - rightPos, maxMemory, cellsLeft, result);
-        for (size_t i = 0; i < anchorLength; ++i)
-            result.push_back({EditKind::Match, left[anchor.left + i], right[anchor.right + i]});
-        leftPos = anchor.left + anchorLength;
-        rightPos = anchor.right + anchorLength;
+        if (anchor.left < leftPos || anchor.right < rightPos) continue;
+        size_t matchLeft = anchor.left;
+        size_t matchRight = anchor.right;
+        while (matchLeft > leftPos && matchRight > rightPos && left[matchLeft - 1] == right[matchRight - 1])
+        {
+            --matchLeft;
+            --matchRight;
+        }
+        size_t matchLength = anchorSize + anchor.left - matchLeft;
+        while (matchLeft + matchLength < left.size() && matchRight + matchLength < right.size() &&
+               left[matchLeft + matchLength] == right[matchRight + matchLength])
+            ++matchLength;
+        fastGapDiff(at(left, leftPos), matchLeft - leftPos, at(right, rightPos),
+                    matchRight - rightPos, fineDiff, maxMemory, cellsLeft, result);
+        for (size_t i = 0; i < matchLength; ++i)
+            result.push_back({EditKind::Match, left[matchLeft + i], right[matchRight + i]});
+        leftPos = matchLeft + matchLength;
+        rightPos = matchRight + matchLength;
         progress.update(leftPos + rightPos, left.size() + right.size());
     }
     fastGapDiff(at(left, leftPos), left.size() - leftPos, at(right, rightPos),
-                right.size() - rightPos, maxMemory, cellsLeft, result);
+                right.size() - rightPos, fineDiff, maxMemory, cellsLeft, result);
     progress.finish();
     return result;
 }
@@ -606,6 +631,8 @@ int main(int argc, char* argv[])
     cl.addOption('c', "color", "Force ANSI colors, for example when piping into less -R.");
     cl.addOption('w', "width", "Set output width, for example when piping into less.", "N", "0");
     cl.addOption('p', "progress", "Show progress while finding and diffing matching regions.");
+    cl.addOption(' ', "fine-diff", "Use bounded dynamic programming within gaps between matching anchors.");
+    cl.addOption('s', "anchor-size", "Minimum exact-match anchor size in bytes.", "N", "16");
     cl.addOption(' ', "show-matches", "Include matching bytes in the output.");
     cl.addOption(' ', "max-mem", "Rough maximum memory for dynamic-programming rows, in MiB.", "N", "10");
     try
@@ -616,6 +643,9 @@ int main(int argc, char* argv[])
         const uint64_t maxMemMiB = cl.getUInt("max-mem");
         if (maxMemMiB == 0 || maxMemMiB > std::numeric_limits<uint64_t>::max() / 1048576ULL)
             cl.error("--max-mem must be a positive integer.");
+        const uint64_t requestedAnchorSize = cl.getUInt("anchor-size");
+        if (requestedAnchorSize == 0 || requestedAnchorSize > std::numeric_limits<size_t>::max())
+            cl.error("--anchor-size must be a positive integer.");
         const uint64_t requestedWidth = cl.getUInt("width");
         if (cl.isSet("width") && requestedWidth == 0) cl.error("--width must be a positive integer.");
         const size_t width = requestedWidth ? static_cast<size_t>(requestedWidth) : ut1::tui::terminalWidth();
@@ -629,7 +659,8 @@ int main(int argc, char* argv[])
         const Bytes right = readFile(cl.getArgs()[1]);
         const bool asciiMode = cl("ascii") || (!cl("hex") && looksAscii(left) && looksAscii(right));
         Progress progress(cl("progress"), width);
-        const std::vector<Edit> edits = makeDiff(left, right, maxMemMiB * 1048576ULL, progress);
+        const std::vector<Edit> edits = makeDiff(left, right, static_cast<size_t>(requestedAnchorSize),
+                                                 cl("fine-diff"), maxMemMiB * 1048576ULL, progress);
         printDiff(edits, cl.getArgs()[0], cl.getArgs()[1], asciiMode, cl("show-matches"), cl("annotate-spaces"),
                   std::max(left.size(), right.size()), width, cl("color"));
         return std::any_of(edits.begin(), edits.end(), [](const Edit& e) { return e.kind != EditKind::Match; }) ? 1 : 0;
