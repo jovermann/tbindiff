@@ -57,6 +57,15 @@ class TbindiffTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("positive integer", result.stdout)
 
+    def test_help_has_examples_and_copyright_trailer(self):
+        result = subprocess.run(["./tbindiff", "--help"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(result.stdout.index("Examples:"), result.stdout.index("Options:"))
+        self.assertIn("Copyright (c) 2026 Johannes Overmann", result.stdout)
+        self.assertIn("https://github.com/jovermann/tbindiff", result.stdout)
+        self.assertTrue(result.stdout.endswith("\n"))
+        self.assertFalse(result.stdout.endswith("\n\n"))
+
     def test_argument_errors(self):
         result = self.run_diff(b"a", b"b", "--hex", "--ascii")
         self.assertEqual(result.returncode, 1)

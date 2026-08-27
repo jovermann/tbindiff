@@ -1,7 +1,9 @@
 // tbindiff - Show differences between two binary files
 //
 // Copyright (c) 2026 Johannes Overmann
+//
 // Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
 
 #include "CommandLineParser.hpp"
 #include "Tui.hpp"
@@ -624,7 +626,20 @@ static void printDiff(const std::vector<Edit>& edits, const std::string& leftNam
 
 int main(int argc, char* argv[])
 {
-    ut1::CommandLineParser cl("tbindiff", "Show a file or differences between two binary files.\n\nUsage: tbindiff [OPTIONS] FILE1 [FILE2]", "", "0.1.0");
+    const char* usage = "Show a file or differences between two binary files.\n"
+                        "\n"
+                        "Usage: $programName [OPTIONS] FILE1 [FILE2]\n"
+                        "\n"
+                        "Examples:\n"
+                        "  $programName firmware.bin\n"
+                        "  $programName old.bin new.bin\n"
+                        "  $programName --ascii --show-matches old.txt new.txt\n"
+                        "  $programName --color --width 160 old.bin new.bin | less -R\n"
+                        "\n"
+                        "Options:";
+    ut1::CommandLineParser cl("tbindiff", usage,
+        "\n$programName version $version ($compileDate) *** Copyright (c) 2026 Johannes Overmann *** https://github.com/jovermann/tbindiff",
+        "0.1.0");
     cl.addOption('x', "hex", "Show bytes in hexadecimal with an ASCII column.");
     cl.addOption('a', "ascii", "Show bytes as printable ASCII characters.");
     cl.addOption(' ', "annotate-spaces", "Show spaces as <SP> in ASCII mode.");
