@@ -66,6 +66,14 @@ class TbindiffTest(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("\n"))
         self.assertFalse(result.stdout.endswith("\n\n"))
 
+    def test_ui_requires_two_files_and_a_terminal(self):
+        one_file = self.run_view(b"abc", "--ui")
+        self.assertEqual(one_file.returncode, 1)
+        self.assertIn("requires two file names", one_file.stdout)
+        two_files = self.run_diff(b"abc", b"abd", "--ui")
+        self.assertEqual(two_files.returncode, 2)
+        self.assertIn("requires terminal output", two_files.stderr)
+
     def test_argument_errors(self):
         result = self.run_diff(b"a", b"b", "--hex", "--ascii")
         self.assertEqual(result.returncode, 1)

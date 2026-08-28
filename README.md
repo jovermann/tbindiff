@@ -11,6 +11,7 @@ make
 ./tbindiff firmware.bin
 ./tbindiff --anchor-size 32 old.bin new.bin
 ./tbindiff --fine-diff old.bin new.bin
+./tbindiff --ui old.bin new.bin
 ```
 
 With one file argument, `tbindiff` acts as a simple hexadecimal or ASCII file viewer. With two, it shows their differences side by side. The default mode is detected from the inputs: when each file has less than 10% binary bytes, ASCII mode is used; otherwise hexadecimal mode is used. Binary bytes for this test are bytes above `0x7f` and ASCII controls other than `TAB`, `LF`, `VT`, `FF`, `CR`, and `ESC`. `--ascii` and `--hex` override detection. ASCII mode gives those six controls explicit names and renders other non-printable bytes as `<xXX>`. A rendered `<LF>` always ends the output row to preserve the input's line structure. `--annotate-spaces` displays spaces as `<SP>` in ASCII mode. ASCII rows are packed according to rendered width, including the extra columns used by annotations. Differences are red (deletions), green (insertions), or yellow (substitutions); matches are gray. Colors are enabled when standard output is a terminal; `--color` forces them through a pipe. `--width` overrides the detected terminal width, and `--progress` reports comparison progress on standard error.
@@ -18,6 +19,8 @@ With one file argument, `tbindiff` acts as a simple hexadecimal or ASCII file vi
 The exit status follows the usual diff convention: 0 for identical files, 1 for differences, and 2 for an error. `--max-mem` is a rough MiB limit for dynamic-programming work rows. File contents, binary-anchor indexes, and the resulting edit script are not counted against it.
 
 The comparison first finds unique, content-defined anchors and selects a non-crossing chain of them. Anchors are 16 bytes by default and can be configured with `-s`/`--anchor-size`. Every anchor is expanded through all adjacent matching bytes. Gaps between these substantial matches are shown directly as positional substitutions followed by remaining insertions or deletions; isolated equal bytes in a gap are intentionally not treated as meaningful matches. `--fine-diff` enables bounded dynamic programming inside the gaps when byte-level alignment is wanted. Work in large divergent gaps remains bounded, keeping comparisons of multi-megabyte files fast even when little content is shared.
+
+`-u`/`--ui` opens an interactive terminal pager for a two-file diff. It starts in the automatically detected mode unless `--ascii` or `--hex` selects one explicitly. Cursor Up/Down scroll one row; `e` and `y` move one line forward and backward. Page Up/Down scroll one screen; Space or `f` scrolls down; and `b` scrolls up. Press `p` or `g` to jump to the beginning and `G` to jump to the end. Press `a` to toggle ASCII and binary/hex mode, `s` to toggle `<SP>` annotations in ASCII mode, `m` to toggle matching regions, `o` to cycle hexadecimal, decimal, and human-readable offsets, `h` to toggle key help, `c` to toggle the ANSI color chart, and `q` or Escape to quit. Human-readable offsets use one unit derived from the larger file, making offsets on both sides directly comparable. The title shows both filenames. The status starts with the scroll position and then reports toggle state as `KEY:state` without listing navigation keys.
 
 ## Building and testing
 
