@@ -52,6 +52,13 @@ class TbindiffTest(unittest.TestCase):
         self.assertIn("abXc", coarse.stdout)
         self.assertNotIn("abXc", fine.stdout)
 
+    def test_unequal_coarse_replacement_is_one_run(self):
+        result = self.run_diff(b"ABCDE", b"xy", "--ascii", "--show-matches", "--width", "100")
+        data_lines = [line for line in result.stdout.splitlines() if re.match(r"^[0-9a-f]{8}:", line)]
+        self.assertEqual(len(data_lines), 1)
+        self.assertIn("ABCDE", data_lines[0])
+        self.assertIn("xy", data_lines[0])
+
     def test_anchor_size_must_be_positive(self):
         result = self.run_diff(b"a", b"b", "--anchor-size", "0")
         self.assertEqual(result.returncode, 1)
@@ -66,10 +73,10 @@ class TbindiffTest(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("\n"))
         self.assertFalse(result.stdout.endswith("\n\n"))
 
-    def test_ui_requires_two_files_and_a_terminal(self):
+    def test_ui_requires_a_terminal(self):
         one_file = self.run_view(b"abc", "--ui")
-        self.assertEqual(one_file.returncode, 1)
-        self.assertIn("requires two file names", one_file.stdout)
+        self.assertEqual(one_file.returncode, 2)
+        self.assertIn("requires terminal output", one_file.stderr)
         two_files = self.run_diff(b"abc", b"abd", "--ui")
         self.assertEqual(two_files.returncode, 2)
         self.assertIn("requires terminal output", two_files.stderr)
@@ -95,6 +102,10 @@ class TbindiffTest(unittest.TestCase):
         result = self.run_diff(b"A", b"B", "--hex", "--width", "80")
         self.assertNotIn("|A|", result.stdout)
         self.assertNotIn("|B|", result.stdout)
+
+    def test_hex_rows_group_each_eight_bytes(self):
+        result = self.run_view(bytes(range(16)), "--hex", "--width", "100")
+        self.assertIn("07  08", result.stdout)
 
     def test_ascii_control_non_ascii_and_space_annotations(self):
         result = self.run_diff(b"\n \t\x00\x07\x08\x7f\x01\x80", b"\r \t\x02\x03\x04\x05\x06\xff", "--ascii", "--show-matches",

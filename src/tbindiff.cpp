@@ -25,8 +25,9 @@
 
 namespace fs = std::filesystem;
 
-/// Kind of one aligned byte-level edit operation.
-enum class EditKind { Match, Substitute, Delete, Insert };
+/// Kind of one aligned byte-level edit operation. ReplaceDelete and
+/// ReplaceInsert are one-sided tails of a variable-length coarse substitution.
+enum class EditKind { Match, Substitute, Delete, Insert, ReplaceDelete, ReplaceInsert };
 
 /// One element of an edit script, with bytes stored on their respective sides.
 /// The unused byte is zero for an insertion or deletion.
@@ -39,6 +40,39 @@ struct Edit
     /// Byte from the right input, or zero for a deletion.
     uint8_t right{};
 };
+
+/// Test whether an edit has a byte on the left side.
+/// \param edit Edit to inspect.
+/// \return False only for ordinary insertions and replacement insertion tails.
+static bool hasLeft(const Edit& edit)
+{
+    return edit.kind != EditKind::Insert && edit.kind != EditKind::ReplaceInsert;
+}
+
+/// Test whether an edit has a byte on the right side.
+/// \param edit Edit to inspect.
+/// \return False only for ordinary deletions and replacement deletion tails.
+static bool hasRight(const Edit& edit)
+{
+    return edit.kind != EditKind::Delete && edit.kind != EditKind::ReplaceDelete;
+}
+
+/// Test whether an edit belongs to a variable-length replacement.
+/// \param kind Edit kind to inspect.
+/// \return True for paired substitutions and either one-sided replacement tail.
+static bool isReplacement(EditKind kind)
+{
+    return kind == EditKind::Substitute || kind == EditKind::ReplaceDelete || kind == EditKind::ReplaceInsert;
+}
+
+/// Test whether adjacent edits should be rendered as one semantic run.
+/// \param left First edit kind.
+/// \param right Second edit kind.
+/// \return True for identical kinds or for two parts of one replacement.
+static bool sameDisplayRun(EditKind left, EditKind right)
+{
+    return left == right || (isReplacement(left) && isReplacement(right));
+}
 
 /// In-memory byte sequence used for input files.
 using Bytes = std::vector<uint8_t>;
@@ -428,8 +462,10 @@ static void fastGapDiff(const uint8_t* left, size_t leftSize, const uint8_t* rig
     {
         const size_t paired = std::min(leftSize, rightSize);
         for (size_t i = 0; i < paired; ++i) result.push_back({EditKind::Substitute, left[i], right[i]});
-        for (size_t i = paired; i < leftSize; ++i) result.push_back({EditKind::Delete, left[i], 0});
-        for (size_t i = paired; i < rightSize; ++i) result.push_back({EditKind::Insert, 0, right[i]});
+        const EditKind leftTail = paired ? EditKind::ReplaceDelete : EditKind::Delete;
+        const EditKind rightTail = paired ? EditKind::ReplaceInsert : EditKind::Insert;
+        for (size_t i = paired; i < leftSize; ++i) result.push_back({leftTail, left[i], 0});
+        for (size_t i = paired; i < rightSize; ++i) result.push_back({rightTail, 0, right[i]});
         return;
     }
     size_t prefix = 0;
@@ -459,8 +495,10 @@ static void fastGapDiff(const uint8_t* left, size_t leftSize, const uint8_t* rig
         const size_t paired = std::min(aMiddle, bMiddle);
         for (size_t i = 0; i < paired; ++i)
             result.push_back({left[i] == right[i] ? EditKind::Match : EditKind::Substitute, left[i], right[i]});
-        for (size_t i = paired; i < aMiddle; ++i) result.push_back({EditKind::Delete, left[i], 0});
-        for (size_t i = paired; i < bMiddle; ++i) result.push_back({EditKind::Insert, 0, right[i]});
+        const EditKind leftTail = paired ? EditKind::ReplaceDelete : EditKind::Delete;
+        const EditKind rightTail = paired ? EditKind::ReplaceInsert : EditKind::Insert;
+        for (size_t i = paired; i < aMiddle; ++i) result.push_back({leftTail, left[i], 0});
+        for (size_t i = paired; i < bMiddle; ++i) result.push_back({rightTail, 0, right[i]});
     }
     for (size_t i = suffix; i > 0; --i)
         result.push_back({EditKind::Match, left[leftSize - i], right[rightSize - i]});
@@ -603,26 +641,31 @@ static std::string renderHex(const std::vector<Edit>& edits, size_t begin, size_
 {
     std::ostringstream os;
     std::string ascii;
-    size_t emitted = 0;
-    for (size_t i = begin; i < end; ++i)
+    for (size_t slot = 0; slot < count; ++slot)
     {
-        const Edit& e = edits[i];
-        const bool present = leftSide ? e.kind != EditKind::Insert : e.kind != EditKind::Delete;
-        if (present)
+        if (begin + slot < end)
         {
-            const uint8_t value = leftSide ? e.left : e.right;
-            os << std::hex << std::setw(2) << std::setfill('0') << unsigned(value) << ' ';
-            ascii += printable(value);
+            const Edit& edit = edits[begin + slot];
+            const bool present = leftSide ? hasLeft(edit) : hasRight(edit);
+            if (present)
+            {
+                const uint8_t value = leftSide ? edit.left : edit.right;
+                os << std::hex << std::setw(2) << std::setfill('0') << unsigned(value) << ' ';
+                ascii += printable(value);
+            }
+            else
+            {
+                os << "   ";
+                ascii += ' ';
+            }
         }
         else
         {
             os << "   ";
             ascii += ' ';
         }
-        ++emitted;
+        if ((slot + 1) % 8 == 0 && slot + 1 < count) os << ' ';
     }
-    while (emitted++ < count) os << "   ";
-    ascii.resize(count, ' ');
     os << ' ' << ascii;
     return os.str();
 }
@@ -665,7 +708,7 @@ static std::string renderAscii(const std::vector<Edit>& edits, size_t begin, siz
     for (size_t i = begin; i < end; ++i)
     {
         const Edit& e = edits[i];
-        const bool present = leftSide ? e.kind != EditKind::Insert : e.kind != EditKind::Delete;
+        const bool present = leftSide ? hasLeft(e) : hasRight(e);
         if (present) text += asciiToken(leftSide ? e.left : e.right, annotateSpaces);
     }
     text.resize(fieldWidth, ' ');
@@ -679,7 +722,7 @@ static std::string renderAscii(const std::vector<Edit>& edits, size_t begin, siz
 /// \return Token width, or zero when the edit has no byte on that side.
 static size_t asciiRenderedWidth(const Edit& edit, bool leftSide, bool annotateSpaces)
 {
-    const bool present = leftSide ? edit.kind != EditKind::Insert : edit.kind != EditKind::Delete;
+    const bool present = leftSide ? hasLeft(edit) : hasRight(edit);
     return present ? asciiToken(leftSide ? edit.left : edit.right, annotateSpaces).size() : 0;
 }
 
@@ -689,23 +732,41 @@ static size_t asciiRenderedWidth(const Edit& edit, bool leftSide, bool annotateS
 /// \param asciiMode Select tokenized ASCII instead of hexadecimal hexdump output.
 /// \param annotateSpaces Whether ASCII spaces use <SP>.
 /// \param width Maximum desired terminal width.
+/// \param offsetFormat Representation used for byte offsets.
 /// \param forceColor Enable ANSI colors even when stdout is not a terminal.
+/// \param os Stream receiving rendered output.
+/// \param showHeading Print the filename heading when true.
+/// \param lineOffsets Optional destination receiving each emitted row's byte offset.
+/// \param requestedHexCount Exact hexadecimal row width, or zero for automatic.
 /// ASCII rows use rendered token widths and end immediately after an LF token.
 static void printFile(const Bytes& data, const std::string& name, bool asciiMode, bool annotateSpaces,
-                      size_t width, bool forceColor)
+                      size_t width, OffsetFormat offsetFormat, bool forceColor, std::ostream& os = std::cout,
+                      bool showHeading = true, std::vector<size_t>* lineOffsets = nullptr,
+                      size_t requestedHexCount = 0)
 {
-    const size_t offsetDigits = data.size() > 0xffffffffULL ? 16 : 8;
+    const size_t offsetDigits = offsetWidth(offsetFormat, data.size());
     const size_t fixed = offsetDigits + 2;
     const size_t contentWidth = std::max<size_t>(5, width > fixed ? width - fixed : 5);
-    const size_t hexCount = std::max<size_t>(1, std::min<size_t>(16, contentWidth > 1 ? (contentWidth - 1) / 4 : 1));
+    size_t automaticHexCount = 1;
+    for (size_t count = 2; count <= 16; ++count)
+    {
+        if (4 * count + 1 + (count - 1) / 8 > contentWidth) break;
+        automaticHexCount = count;
+    }
+    const size_t hexCount = requestedHexCount ? requestedHexCount : automaticHexCount;
     const bool color = forceColor || isatty(STDOUT_FILENO);
-    if (color) std::cout << ut1::tui::ansiBold << ut1::tui::ansiCyan;
-    std::cout << ut1::tui::fitTerminalLine(name, width) << '\n';
-    if (color) std::cout << ut1::tui::ansiReset;
+    if (showHeading)
+    {
+        if (color) os << ut1::tui::ansiBold << ut1::tui::ansiCyan;
+        os << ut1::tui::fitTerminalLine(name, width);
+        if (color) os << ut1::tui::ansiReset;
+        os << '\n';
+    }
 
     size_t offset = 0;
     while (offset < data.size())
     {
+        if (lineOffsets) lineOffsets->push_back(offset);
         size_t end = std::min(data.size(), offset + hexCount);
         if (asciiMode)
         {
@@ -720,25 +781,31 @@ static void printFile(const Bytes& data, const std::string& name, bool asciiMode
                 if (linefeed) break;
             }
         }
-        if (color) std::cout << ut1::tui::ansiCyan;
-        std::cout << hexOffset(offset, offsetDigits) << ": ";
-        if (color) std::cout << ut1::tui::ansiReset;
+        if (color) os << ut1::tui::ansiCyan;
+        os << std::right << std::setfill(' ') << std::setw(static_cast<int>(offsetDigits))
+           << formatOffset(offset, offsetFormat, data.size()) << ": ";
+        if (color) os << ut1::tui::ansiReset;
         if (asciiMode)
         {
-            for (size_t i = offset; i < end; ++i) std::cout << asciiToken(data[i], annotateSpaces);
+            for (size_t i = offset; i < end; ++i) os << asciiToken(data[i], annotateSpaces);
         }
         else
         {
             std::string ascii;
             for (size_t i = offset; i < end; ++i)
             {
-                std::cout << std::hex << std::setw(2) << std::setfill('0') << unsigned(data[i]) << ' ';
+                os << std::hex << std::setw(2) << std::setfill('0') << unsigned(data[i]) << ' ';
                 ascii += printable(data[i]);
+                if ((i - offset + 1) % 8 == 0 && i + 1 < offset + hexCount) os << ' ';
             }
-            for (size_t i = end; i < offset + hexCount; ++i) std::cout << "   ";
-            std::cout << ' ' << ascii;
+            for (size_t i = end; i < offset + hexCount; ++i)
+            {
+                os << "   ";
+                if ((i - offset + 1) % 8 == 0 && i + 1 < offset + hexCount) os << ' ';
+            }
+            os << ' ' << ascii;
         }
-        std::cout << '\n';
+        os << '\n';
         offset = end;
     }
 }
@@ -752,6 +819,8 @@ static const char* colorFor(EditKind kind)
     {
     case EditKind::Match: return ut1::tui::ansiGray;
     case EditKind::Substitute: return ut1::tui::ansiBrightYellow;
+    case EditKind::ReplaceDelete: return ut1::tui::ansiBrightYellow;
+    case EditKind::ReplaceInsert: return ut1::tui::ansiBrightYellow;
     case EditKind::Delete: return ut1::tui::ansiBrightRed;
     case EditKind::Insert: return ut1::tui::ansiBrightGreen;
     }
@@ -774,14 +843,24 @@ struct DiffLayout
 /// \param maxFileSize Larger input size, used for offset dimensions.
 /// \param width Available terminal width.
 /// \param offsetFormat Active offset representation.
+/// \param requestedHexCount Exact hexadecimal width, or zero for automatic.
 /// \return Dimensions used by both heading and data rows.
-static DiffLayout getDiffLayout(bool asciiMode, size_t maxFileSize, size_t width, OffsetFormat offsetFormat)
+static DiffLayout getDiffLayout(bool asciiMode, size_t maxFileSize, size_t width, OffsetFormat offsetFormat,
+                                size_t requestedHexCount = 0)
 {
     const size_t offset = offsetWidth(offsetFormat, maxFileSize);
     const size_t fixed = 2 * (offset + 2) + 3;
-    const size_t hexCount = std::max<size_t>(1, std::min<size_t>(16, (width > fixed + 2 ? width - fixed - 2 : 8) / 8));
+    size_t automaticHexCount = 1;
+    for (size_t count = 2; count <= 16; ++count)
+    {
+        const size_t candidateSide = 4 * count + 1 + (count - 1) / 8;
+        if (2 * (offset + 2 + candidateSide) + 3 > width) break;
+        automaticHexCount = count;
+    }
+    const size_t hexCount = requestedHexCount ? requestedHexCount : automaticHexCount;
+    const size_t groupSpaces = hexCount ? (hexCount - 1) / 8 : 0;
     const size_t side = asciiMode ? std::max<size_t>(5, width > fixed ? (width - fixed) / 2 : 5)
-                                  : 4 * hexCount + 1;
+                                  : 4 * hexCount + 1 + groupSpaces;
     return {offset, hexCount, side};
 }
 
@@ -792,11 +871,13 @@ static DiffLayout getDiffLayout(bool asciiMode, size_t maxFileSize, size_t width
 /// \param maxFileSize Larger input size.
 /// \param width Available terminal width.
 /// \param offsetFormat Active offset representation.
+/// \param requestedHexCount Exact hexadecimal width, or zero for automatic.
 /// \return Plain title text with its separator aligned to data-row separators.
 static std::string formatDiffHeading(const std::string& leftName, const std::string& rightName, bool asciiMode,
-                                     size_t maxFileSize, size_t width, OffsetFormat offsetFormat)
+                                     size_t maxFileSize, size_t width, OffsetFormat offsetFormat,
+                                     size_t requestedHexCount = 0)
 {
-    const DiffLayout layout = getDiffLayout(asciiMode, maxFileSize, width, offsetFormat);
+    const DiffLayout layout = getDiffLayout(asciiMode, maxFileSize, width, offsetFormat, requestedHexCount);
     const size_t headingWidth = layout.offset + 2 + layout.side;
     std::ostringstream os;
     os << std::left << std::setw(static_cast<int>(headingWidth))
@@ -820,13 +901,14 @@ static std::string formatDiffHeading(const std::string& leftName, const std::str
 /// \param showHeading Print the ordinary filename heading when true.
 /// \param lineOffsets Optional destination receiving the left byte offset of
 /// every emitted body row; heading rows are not included.
+/// \param requestedHexCount Exact hexadecimal row width, or zero for automatic.
 /// Rows never mix edit kinds, and ASCII rows end after an LF on either side.
 static void printDiff(const std::vector<Edit>& edits, const std::string& leftName, const std::string& rightName,
                       bool asciiMode, bool showMatches, bool annotateSpaces, size_t maxFileSize, size_t width,
                       OffsetFormat offsetFormat, bool forceColor, std::ostream& os = std::cout, bool showHeading = true,
-                      std::vector<size_t>* lineOffsets = nullptr)
+                      std::vector<size_t>* lineOffsets = nullptr, size_t requestedHexCount = 0)
 {
-    const DiffLayout layout = getDiffLayout(asciiMode, maxFileSize, width, offsetFormat);
+    const DiffLayout layout = getDiffLayout(asciiMode, maxFileSize, width, offsetFormat, requestedHexCount);
     const size_t offsetDigits = layout.offset;
     const size_t hexCount = layout.hexCount;
     const size_t sideWidth = layout.side;
@@ -834,7 +916,7 @@ static void printDiff(const std::vector<Edit>& edits, const std::string& leftNam
     if (showHeading)
     {
         if (color) os << ut1::tui::ansiBold << ut1::tui::ansiCyan;
-        os << formatDiffHeading(leftName, rightName, asciiMode, maxFileSize, width, offsetFormat);
+        os << formatDiffHeading(leftName, rightName, asciiMode, maxFileSize, width, offsetFormat, requestedHexCount);
         if (color) os << ut1::tui::ansiReset;
         os << '\n';
     }
@@ -845,7 +927,7 @@ static void printDiff(const std::vector<Edit>& edits, const std::string& leftNam
     {
         const EditKind kind = edits[i].kind;
         size_t runEnd = i;
-        while (runEnd < edits.size() && edits[runEnd].kind == kind) ++runEnd;
+        while (runEnd < edits.size() && sameDisplayRun(edits[runEnd].kind, kind)) ++runEnd;
         if (kind == EditKind::Match && !showMatches)
         {
             const size_t run = runEnd - i;
@@ -873,8 +955,8 @@ static void printDiff(const std::vector<Edit>& edits, const std::string& leftNam
                     leftUsed = nextLeft;
                     rightUsed = nextRight;
                     const Edit& edit = edits[end++];
-                    const bool leftLinefeed = edit.kind != EditKind::Insert && edit.left == '\n';
-                    const bool rightLinefeed = edit.kind != EditKind::Delete && edit.right == '\n';
+                    const bool leftLinefeed = hasLeft(edit) && edit.left == '\n';
+                    const bool rightLinefeed = hasRight(edit) && edit.right == '\n';
                     if (leftLinefeed || rightLinefeed) break;
                 }
             }
@@ -889,8 +971,8 @@ static void printDiff(const std::vector<Edit>& edits, const std::string& leftNam
             os << '\n';
             for (size_t p = i; p < end; ++p)
             {
-                if (edits[p].kind != EditKind::Insert) ++leftOffset;
-                if (edits[p].kind != EditKind::Delete) ++rightOffset;
+                if (hasLeft(edits[p])) ++leftOffset;
+                if (hasRight(edits[p])) ++rightOffset;
             }
             i = end;
         }
@@ -935,6 +1017,26 @@ static void printUiBar(const std::string& text, const char* color, size_t width)
     std::cout << ut1::tui::ansiReset;
 }
 
+/// Find the largest multiple-of-eight hex row width fitting the terminal.
+/// \param viewerMode True for a one-column viewer, false for side-by-side diff.
+/// \param maxFileSize Larger input size, used for offset width.
+/// \param width Available terminal width.
+/// \param offsetFormat Active offset representation.
+/// \return At least eight bytes; narrow terminals may necessarily wrap.
+static size_t maxUiHexCount(bool viewerMode, size_t maxFileSize, size_t width, OffsetFormat offsetFormat)
+{
+    const size_t offset = offsetWidth(offsetFormat, maxFileSize);
+    size_t best = 8;
+    for (size_t count = 8; count <= 4096; count += 8)
+    {
+        const size_t side = 4 * count + 1 + (count - 1) / 8;
+        const size_t required = viewerMode ? offset + 2 + side : 2 * (offset + 2 + side) + 3;
+        if (required > width) break;
+        best = count;
+    }
+    return best;
+}
+
 /// Run the interactive side-by-side diff pager.
 /// \param edits Complete edit script to display.
 /// \param leftName Left filename for the title.
@@ -943,14 +1045,18 @@ static void printUiBar(const std::string& text, const char* color, size_t width)
 /// \param showMatches Initial match visibility.
 /// \param annotateSpaces Whether ASCII spaces use <SP>.
 /// \param maxFileSize Larger input size, used to select offset width.
+/// \param fileData Non-null in single-file viewer mode; edits and rightName are
+/// ignored for rendering in that mode.
 /// Cursor keys scroll one row, Page Up/Down scroll one screen, Space scrolls
 /// down, and b scrolls up one screen. The a, m, h, c, and o keys toggle display
 /// mode, matches, help, ANSI colors, and offset format. The s key toggles space
 /// annotations in ASCII mode, p or g jumps to the beginning, G jumps to the end, and
-/// The e and y keys move one line forward/backward and f moves one page forward.
+/// w cycles multiples-of-eight hex row widths. The e and y keys move one line
+/// forward/backward and f moves one page forward.
 /// The q key or Escape exits.
 static void runUi(const std::vector<Edit>& edits, const std::string& leftName, const std::string& rightName,
-                  bool asciiMode, bool showMatches, bool annotateSpaces, size_t maxFileSize)
+                  bool asciiMode, bool showMatches, bool annotateSpaces, size_t maxFileSize,
+                  const Bytes* fileData = nullptr)
 {
     if (!isatty(STDOUT_FILENO)) throw std::runtime_error("--ui requires terminal output.");
     ut1::tui::TerminalRawMode rawMode(STDIN_FILENO);
@@ -964,6 +1070,8 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
     bool showHelp = false;
     bool showColors = false;
     OffsetFormat offsetFormat = OffsetFormat::Hexadecimal;
+    // Zero selects the widest fitting multiple of eight on the first render.
+    size_t hexCount = 0;
     size_t topOffset = 0;
     bool restoreTopOffset = false;
     while (running)
@@ -971,6 +1079,9 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         const size_t width = ut1::tui::terminalWidth();
         const size_t height = ut1::tui::terminalHeight();
         const size_t bodyHeight = height > 2 ? height - 2 : 1;
+        const size_t maximumHexCount = maxUiHexCount(fileData != nullptr, maxFileSize, width, offsetFormat);
+        if (hexCount == 0) hexCount = maximumHexCount;
+        else hexCount = std::min(hexCount, maximumHexCount);
         if (!showHelp && !showColors && renderedWidth && renderedWidth != width && firstLine < lineOffsets.size())
         {
             topOffset = lineOffsets[firstLine];
@@ -980,8 +1091,12 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         {
             std::ostringstream rendered;
             lineOffsets.clear();
-            printDiff(edits, leftName, rightName, asciiMode, showMatches, annotateSpaces, maxFileSize,
-                      width, offsetFormat, true, rendered, false, &lineOffsets);
+            if (fileData)
+                printFile(*fileData, leftName, asciiMode, annotateSpaces, width, offsetFormat,
+                          true, rendered, false, &lineOffsets, hexCount);
+            else
+                printDiff(edits, leftName, rightName, asciiMode, showMatches, annotateSpaces, maxFileSize,
+                          width, offsetFormat, true, rendered, false, &lineOffsets, hexCount);
             lines = splitRenderedLines(rendered.str());
             renderedWidth = width;
             renderDirty = false;
@@ -1009,13 +1124,14 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
                 "p / g           Jump to beginning",
                 "G               Jump to end",
                 "a               Toggle ASCII and binary/hex mode",
-                "m               Toggle matching regions",
                 "s               Toggle <SP> annotations in ASCII mode",
+                "w               Cycle hex row width: 8, 16, 24, ...",
                 "o               Cycle hex, decimal, and human-readable offsets",
                 "c               Toggle ANSI color chart",
                 "h               Toggle this help",
                 "q / Escape      Quit",
             };
+            if (!fileData) overlayLines.insert(overlayLines.begin() + 8, "m               Toggle matching regions");
         }
         else if (showColors)
         {
@@ -1028,7 +1144,9 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         firstLine = std::min(firstLine, maxFirst);
 
         ut1::tui::clearScreen();
-        printUiBar(formatDiffHeading(leftName, rightName, asciiMode, maxFileSize, width, offsetFormat),
+        const std::string title = fileData ? leftName :
+            formatDiffHeading(leftName, rightName, asciiMode, maxFileSize, width, offsetFormat, hexCount);
+        printUiBar(title,
                    ut1::tui::ansiWhiteOnBlue, width);
         std::cout << '\n';
         for (size_t row = 0; row < bodyHeight; ++row)
@@ -1039,9 +1157,11 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         }
         const std::string mode = asciiMode ? "ASCII" : "binary";
         const std::string matches = showMatches ? "shown" : "hidden";
-        const std::string spaces = asciiMode ? " s:" + std::string(annotateSpaces ? "annotated" : "plain") : "";
+        const std::string spaces = asciiMode ? " s:" + std::string(annotateSpaces ? "annotated" : "plain") :
+                                               " w:" + std::to_string(hexCount);
+        const std::string matchState = fileData ? "" : " m:" + matches;
         printUiBar(std::to_string(firstLine + 1) + "/" + std::to_string(std::max<size_t>(1, displayedLines.size())) +
-                       " a:" + mode + " m:" + matches + spaces + " o:" + offsetFormatShortName(offsetFormat) +
+                       " a:" + mode + matchState + spaces + " o:" + offsetFormatShortName(offsetFormat) +
                        " h:help q:quit",
                    ut1::tui::ansiBlackOnCyan, width);
         std::cout.flush();
@@ -1056,7 +1176,7 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         else if (key == 'b' || key == 'B') firstLine = firstLine > bodyHeight ? firstLine - bodyHeight : 0;
         else if (key == 'p' || key == 'g') firstLine = 0;
         else if (key == 'G') firstLine = maxFirst;
-        else if (key == 'm' || key == 'M')
+        else if (!fileData && (key == 'm' || key == 'M'))
         {
             if (!showHelp && !showColors && firstLine < lineOffsets.size()) topOffset = lineOffsets[firstLine];
             showMatches = !showMatches;
@@ -1074,6 +1194,14 @@ static void runUi(const std::vector<Edit>& edits, const std::string& leftName, c
         {
             if (!showHelp && !showColors && firstLine < lineOffsets.size()) topOffset = lineOffsets[firstLine];
             annotateSpaces = !annotateSpaces;
+            renderDirty = true;
+            restoreTopOffset = !showHelp && !showColors;
+        }
+        else if ((key == 'w' || key == 'W') && !asciiMode)
+        {
+            if (!showHelp && !showColors && firstLine < lineOffsets.size()) topOffset = lineOffsets[firstLine];
+            const size_t maximum = maxUiHexCount(fileData != nullptr, maxFileSize, width, offsetFormat);
+            hexCount = hexCount + 8 <= maximum ? hexCount + 8 : 8;
             renderDirty = true;
             restoreTopOffset = !showHelp && !showColors;
         }
@@ -1132,7 +1260,7 @@ int main(int argc, char* argv[])
     cl.addOption('c', "color", "Force ANSI colors, for example when piping into less -R.");
     cl.addOption('w', "width", "Set output width, for example when piping into less.", "N", "0");
     cl.addOption('p', "progress", "Show progress while finding and diffing matching regions.");
-    cl.addOption('u', "ui", "Open an interactive terminal pager for a two-file diff.");
+    cl.addOption('u', "ui", "Open an interactive terminal pager for viewing a file or diff.");
     cl.addOption(' ', "fine-diff", "Use bounded dynamic programming within gaps between matching anchors.");
     cl.addOption('s', "anchor-size", "Minimum exact-match anchor size in bytes.", "N", "16");
     cl.addOption(' ', "show-matches", "Include matching bytes in the output.");
@@ -1154,9 +1282,15 @@ int main(int argc, char* argv[])
         const Bytes left = readFile(cl.getArgs()[0]);
         if (cl.getArgs().size() == 1)
         {
-            if (cl("ui")) cl.error("--ui requires two file names.");
             const bool asciiMode = cl("ascii") || (!cl("hex") && looksAscii(left));
-            printFile(left, cl.getArgs()[0], asciiMode, cl("annotate-spaces"), width, cl("color"));
+            if (cl("ui"))
+            {
+                const std::vector<Edit> noEdits;
+                runUi(noEdits, cl.getArgs()[0], "", asciiMode, false, cl("annotate-spaces"), left.size(), &left);
+            }
+            else
+                printFile(left, cl.getArgs()[0], asciiMode, cl("annotate-spaces"), width,
+                          OffsetFormat::Hexadecimal, cl("color"));
             return 0;
         }
         const Bytes right = readFile(cl.getArgs()[1]);
